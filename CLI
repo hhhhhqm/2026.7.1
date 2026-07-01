@@ -1,0 +1,394 @@
+"""
+培养方案查询系统 - CLI 界面
+西南财经大学 2024级人才培养方案
+支持6项查询功能
+"""
+
+import os
+import sqlite3
+import textwrap
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(BASE_DIR, "db", "curriculum.db")
+
+
+def get_connection():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
+
+# ============================================================
+# 查询功能 1: 查询某专业的必修课列表
+# ============================================================
+def query_compulsory_courses(major_name):
+    """查询指定专业的必修课列表"""
+    sql = """
+        SELECT c.code, c.name, c.credits, c.total_hours, c.semester, c.nature
+        FROM course c
+        JOIN major_course mc ON c.code = mc.course_code
+        JOIN major m ON mc.major_id = m.id
+        WHERE m.name = ? AND c.nature = '必修'
+        ORDER BY c.semester, c.code
+    """
+    conn = get_connection()
+    rows = conn.execute(sql, (major_name,)).fetchall()
+    conn.close()
+    return rows
+
+
+# ============================================================
+# 查询功能 2: 查询某门课程的学分、学时信息
+# ============================================================
+def query_course_detail(course_name):
+    """查询课程详细信息"""
+    sql = """
+        SELECT code, name, name_en, credits, weekly_hours,
+               total_hours, teaching_hours, practice_hours,
+               nature, department, semester
+        FROM course
+        WHERE name LIKE ?
+    """
+    conn = get_connection()
+    rows = conn.execute(sql, (f"%{course_name}%",)).fetchall()
+    conn.close()
+    return rows
+
+
+# ============================================================
+# 查询功能 3: 查询某专业的总学分要求
+# ============================================================
+def query_major_credits(major_name):
+    """查询专业总学分要求及分项统计"""
+    sql_total = """
+        SELECT m.name, m.code, m.total_credits, m.degree,
+               c.name as college_name
+        FROM major m
+        JOIN college c ON m.college_id = c.id
+        WHERE m.name = ?
+    """
+    sql_detail = """
+        SELECT c.nature,
+               COUNT(*) as course_count,
+               SUM(c.credits) as credit_sum
+        FROM course c
+        JOIN major_course mc ON c.code = mc.course_code
+        JOIN major m ON mc.major_id = m.id
+        WHERE m.name = ?
+        GROUP BY c.nature
+    """
+    conn = get_connection()
+    total = conn.execute(sql_total, (major_name,)).fetchone()
+    detail = conn.execute(sql_detail, (major_name,)).fetchall()
+    conn.close()
+    return total, detail
+
+
+# ============================================================
+# 查询功能 4: 查询开设某门课程的所有专业
+# ============================================================
+def query_majors_by_course(course_name):
+    """查询开设某门课程的所有专业"""
+    sql = """
+        SELECT m.name as major_name, m.code as major_code,
+               c.name as college_name,
+               co.name as course_name, co.code as course_code,
+               co.credits, co.nature
+        FROM major m
+        JOIN major_course mc ON m.id = mc.major_id
+        JOIN course co ON mc.course_code = co.code
+        JOIN college c ON m.college_id = c.id
+        WHERE co.name LIKE ?
+        ORDER BY c.name, m.name
+    """
+    conn = get_connection()
+    rows = conn.execute(sql, (f"%{course_name}%",)).fetchall()
+    conn.close()
+    return rows
+
+
+# ============================================================
+# 查询功能 5: 查询某学院下所有专业的培养方案概览
+# ============================================================
+def query_college_overview(college_name):
+    """查询学院下所有专业的培养方案概览"""
+    sql = """
+        SELECT m.name as major_name, m.code as major_code,
+               m.total_credits, m.degree,
+               (SELECT COUNT(*) FROM major_course mc WHERE mc.major_id = m.id) as course_count,
+               (SELECT SUM(c.credits) FROM course c
+                JOIN major_course mc ON c.code = mc.course_code
+                WHERE mc.major_id = m.id AND c.nature = '必修') as compulsory_credits,
+               (SELECT SUM(c.credits) FROM course c
+                JOIN major_course mc ON c.code = mc.course_code
+                WHERE mc.major_id = m.id AND c.nature != '必修') as elective_credits
+        FROM major m
+        JOIN college c ON m.college_id = c.id
+        WHERE c.name = ?
+        ORDER BY m.name
+    """
+    conn = get_connection()
+    rows = conn.execute(sql, (college_name,)).fetchall()
+    conn.close()
+    return rows
+
+
+# ============================================================
+# 查询功能 6: 关键词模糊搜索课程名称
+# ============================================================
+def search_courses(keyword):
+    """模糊搜索课程"""
+    sql = """
+        SELECT DISTINCT code, name, name_en, credits,
+               total_hours, nature, department
+        FROM course
+        WHERE name LIKE ? OR name_en LIKE ? OR code LIKE ?
+        ORDER BY credits DESC, name
+    """
+    conn = get_connection()
+    pattern = f"%{keyword}%"
+    rows = conn.execute(sql, (pattern, pattern, pattern)).fetchall()
+    conn.close()
+    return rows
+
+
+# ============================================================
+# 辅助函数: 获取列表选项
+# ============================================================
+def get_all_majors():
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT m.name, c.name as college FROM major m "
+        "JOIN college c ON m.college_id = c.id ORDER BY c.name, m.name"
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def get_all_colleges():
+    conn = get_connection()
+    rows = conn.execute("SELECT name FROM college ORDER BY id").fetchall()
+    conn.close()
+    return rows
+
+
+# ============================================================
+# CLI 界面
+# ============================================================
+def print_header(title):
+    width = 60
+    print()
+    print("=" * width)
+    print(f"  {title}")
+    print("=" * width)
+
+
+def print_table(headers, rows, col_widths=None):
+    """简单的表格打印"""
+    if not rows:
+        print("  (无数据)")
+        return
+
+    if col_widths is None:
+        col_widths = []
+        for i, h in enumerate(headers):
+            max_len = len(h)
+            for r in rows:
+                if i < len(r):
+                    max_len = max(max_len, len(str(r[i])))
+            col_widths.append(min(max_len + 2, 30))
+
+    # 表头
+    header_line = "".join(str(h).ljust(col_widths[i]) for i, h in enumerate(headers))
+    print(f"  {header_line}")
+    print(f"  {'-' * sum(col_widths)}")
+
+    # 数据行
+    for r in rows:
+        line = "".join(str(r[i]).ljust(col_widths[i]) for i in range(len(headers)))
+        print(f"  {line}")
+
+
+def show_menu():
+    print("""
+╔══════════════════════════════════════════════════════════╗
+║        西南财经大学培养方案查询系统 (2024级)            ║
+╠══════════════════════════════════════════════════════════╣
+║                                                          ║
+║   [1] 查询某专业的必修课列表                            ║
+║   [2] 查询某门课程的学分、学时信息                      ║
+║   [3] 查询某专业的总学分要求                            ║
+║   [4] 查询开设某门课程的所有专业                        ║
+║   [5] 查询某学院下所有专业的培养方案概览                ║
+║   [6] 关键词模糊搜索课程名称                            ║
+║   [0] 退出                                               ║
+║                                                          ║
+╚══════════════════════════════════════════════════════════╝
+""")
+
+
+def handle_choice(choice):
+    if choice == "1":
+        do_compulsory_query()
+    elif choice == "2":
+        do_course_detail_query()
+    elif choice == "3":
+        do_major_credits_query()
+    elif choice == "4":
+        do_majors_by_course_query()
+    elif choice == "5":
+        do_college_overview_query()
+    elif choice == "6":
+        do_keyword_search()
+    elif choice == "0":
+        print("\n感谢使用，再见！")
+        return False
+    else:
+        print("\n无效选项，请重新输入。")
+    return True
+
+
+def do_compulsory_query():
+    print_header("查询某专业的必修课列表")
+    majors = get_all_majors()
+    print("  可选专业:")
+    for i, m in enumerate(majors):
+        print(f"    {i+1}. {m['name']} ({m['college']})")
+
+    name = input("\n  请输入专业名称: ").strip()
+    if not name:
+        return
+
+    rows = query_compulsory_courses(name)
+    print_header(f"[{name}] 必修课列表 ({len(rows)}门)")
+    print_table(
+        ["课程代码", "课程名称", "学分", "总学时", "学期", "性质"],
+        [[r["code"], r["name"], r["credits"], r["total_hours"],
+          r["semester"], r["nature"]] for r in rows],
+    )
+    total = sum(r["credits"] for r in rows)
+    print(f"\n  必修课总计: {len(rows)}门, {total}学分")
+
+
+def do_course_detail_query():
+    print_header("查询某门课程的学分、学时信息")
+    name = input("  请输入课程名称(支持模糊匹配): ").strip()
+    if not name:
+        return
+
+    rows = query_course_detail(name)
+    print_header(f"搜索 '{name}' 的结果 ({len(rows)}条)")
+    for r in rows:
+        print(f"""
+  课程代码:   {r['code']}
+  课程名称:   {r['name']}
+  英文名称:   {r['name_en']}
+  学分:       {r['credits']}
+  周学时:     {r['weekly_hours']}
+  总学时:     {r['total_hours']} (课堂{r['teaching_hours']} + 实践{r['practice_hours']})
+  课程性质:   {r['nature']}
+  开课学院:   {r['department']}
+  开课学期:   第{r['semester']}学期""")
+
+
+def do_major_credits_query():
+    print_header("查询某专业的总学分要求")
+    majors = get_all_majors()
+    print("  可选专业:")
+    for i, m in enumerate(majors):
+        print(f"    {i+1}. {m['name']} ({m['college']})")
+
+    name = input("\n  请输入专业名称: ").strip()
+    if not name:
+        return
+
+    total, detail = query_major_credits(name)
+    if not total:
+        print(f"  未找到专业: {name}")
+        return
+
+    print_header(f"[{name}] 学分要求")
+    print(f"  专业名称:   {total['name']}")
+    print(f"  专业代码:   {total['code']}")
+    print(f"  所属学院:   {total['college_name']}")
+    print(f"  授予学位:   {total['degree']}")
+    print(f"  毕业最低:   {total['total_credits']} 学分")
+    print()
+    print("  学分分布:")
+    for d in detail:
+        print(f"    {d['nature']}: {d['course_count']}门, {d['credit_sum']}学分")
+
+
+def do_majors_by_course_query():
+    print_header("查询开设某门课程的所有专业")
+    name = input("  请输入课程名称(支持模糊匹配): ").strip()
+    if not name:
+        return
+
+    rows = query_majors_by_course(name)
+    print_header(f"开设 '{name}' 相关课程的专业 ({len(rows)}条)")
+    print_table(
+        ["专业名称", "专业代码", "所属学院", "课程名称", "学分", "性质"],
+        [[r["major_name"], r["major_code"], r["college_name"],
+          r["course_name"], r["credits"], r["nature"]] for r in rows],
+    )
+
+
+def do_college_overview_query():
+    print_header("查询某学院下所有专业的培养方案概览")
+    colleges = get_all_colleges()
+    print("  可选学院:")
+    for i, c in enumerate(colleges):
+        print(f"    {i+1}. {c['name']}")
+
+    name = input("\n  请输入学院名称: ").strip()
+    if not name:
+        return
+
+    rows = query_college_overview(name)
+    print_header(f"[{name}] 专业培养方案概览 ({len(rows)}个专业)")
+    print_table(
+        ["专业名称", "专业代码", "总学分", "学位", "课程数", "必修学分", "选修学分"],
+        [[r["major_name"], r["major_code"], r["total_credits"],
+          r["degree"], r["course_count"],
+          r["compulsory_credits"] or 0, r["elective_credits"] or 0]
+         for r in rows],
+    )
+
+
+def do_keyword_search():
+    print_header("关键词模糊搜索课程名称")
+    keyword = input("  请输入搜索关键词: ").strip()
+    if not keyword:
+        return
+
+    rows = search_courses(keyword)
+    print_header(f"搜索 '{keyword}' 的结果 ({len(rows)}条)")
+    print_table(
+        ["课程代码", "课程名称", "学分", "总学时", "性质", "开课学院"],
+        [[r["code"], r["name"], r["credits"], r["total_hours"],
+          r["nature"], r["department"]] for r in rows],
+    )
+
+
+def main():
+    if not os.path.exists(DB_PATH):
+        print("数据库不存在，请先运行: python db/init_db.py")
+        return
+
+    running = True
+    while running:
+        show_menu()
+        choice = input("  请选择操作 [0-6]: ").strip()
+        try:
+            running = handle_choice(choice)
+        except Exception as e:
+            print(f"\n  出错: {e}")
+
+        if running:
+            input("\n  按回车键继续...")
+
+
+if __name__ == "__main__":
+    main()
