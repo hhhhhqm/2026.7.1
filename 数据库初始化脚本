@@ -1,0 +1,95 @@
+"""
+数据库初始化脚本
+读取 JSON 数据文件，创建 SQLite 数据库并导入数据
+"""
+
+import json
+import os
+import sqlite3
+
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATA_DIR = os.path.join(BASE_DIR, "data")
+DB_DIR = os.path.join(BASE_DIR, "db")
+DB_PATH = os.path.join(DB_DIR, "curriculum.db")
+SCHEMA_PATH = os.path.join(DB_DIR, "schema.sql")
+
+
+def load_json(filename):
+    path = os.path.join(DATA_DIR, filename)
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def init_database():
+    # 删除旧数据库
+    if os.path.exists(DB_PATH):
+        os.remove(DB_PATH)
+
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("PRAGMA foreign_keys = ON")
+    cur = conn.cursor()
+
+    # 执行 schema
+    with open(SCHEMA_PATH, "r", encoding="utf-8") as f:
+        cur.executescript(f.read())
+
+    # 导入学院数据
+    colleges = load_json("colleges.json")
+    for c in colleges:
+        cur.execute(
+            "INSERT INTO college (id, name, name_en) VALUES (?, ?, ?)",
+            (c["id"], c["name"], c["name_en"]),
+        )
+
+    # 导入专业数据
+    majors = load_json("majors.json")
+    for m in majors:
+        cur.execute(
+            "INSERT INTO major (id, name, code, college_id, total_credits, degree) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (m["id"], m["name"], m["code"], m["college_id"],
+             m["total_credits"], m["degree"]),
+        )
+
+    # 导入课程数据
+    courses = load_json("courses.json")
+    for c in courses:
+        cur.execute(
+            "INSERT INTO course (code, name, name_en, credits, weekly_hours, "
+            "total_hours, teaching_hours, practice_hours, nature, department, semester) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (c["code"], c["name"], c["name_en"], c["credits"],
+             c["weekly_hours"], c["total_hours"], c["teaching_hours"],
+             c["practice_hours"], c["nature"], c["department"], c["semester"]),
+        )
+
+    # 导入专业-课程关联数据
+    major_courses = load_json("major_courses.json")
+    for mc in major_courses:
+        cur.execute(
+            "INSERT OR IGNORE INTO major_course (major_id, course_code) VALUES (?, ?)",
+            (mc["major_id"], mc["course_code"]),
+        )
+
+    conn.commit()
+
+    # 统计
+    counts = {}
+    for table in ["college", "major", "course", "major_course"]:
+        cur.execute(f"SELECT COUNT(*) FROM {table}")
+        counts[table] = cur.fetchone()[0]
+
+    conn.close()
+
+    print("=" * 50)
+    print("数据库初始化完成!")
+    print(f"  数据库路径: {DB_PATH}")
+    print(f"  学院数量:   {counts['college']}")
+    print(f"  专业数量:   {counts['major']}")
+    print(f"  课程数量:   {counts['course']}")
+    print(f"  关联记录:   {counts['major_course']}")
+    print("=" * 50)
+
+
+if __name__ == "__main__":
+    init_database()
